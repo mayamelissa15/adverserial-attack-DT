@@ -1,8 +1,4 @@
 """
-whitebox.py  — version améliorée
-Attaques adversariales en boîte blanche : FGSM · PGD · C&W
-Modèles cibles : MLP · LogReg · XGBoost
-
 ═══════════════════════════════════════════════════════════════
 CHANGEMENTS PAR RAPPORT À LA VERSION INITIALE
 ═══════════════════════════════════════════════════════════════

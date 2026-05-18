@@ -1,22 +1,4 @@
-"""
-models.py
-Définit les architectures et wrappers utilisés dans le projet SWaT.
 
-Wrappers disponibles :
-  - MLPWrapper      : réseau PyTorch différentiable (gradient analytique)
-  - LogRegWrapper   : régression logistique sklearn (gradient analytique via coef_)
-  - XGBoostWrapper  : XGBoost sklearn (gradient NUMÉRIQUE par différences finies)
-
-Gradient numérique (XGBoost) — principe :
-  XGBoost est un ensemble d'arbres de décision : il n'existe pas de gradient
-  analytique par rapport aux entrées.  On l'approxime par différences finies
-  centrées sur le logit log(p/(1-p)) :
-
-      ∂logit/∂x_j  ≈  [logit(x + ε·eⱼ) − logit(x − ε·eⱼ)] / (2ε)
-
-  Pour 51 features SWaT cela représente 102 forward passes par exemple,
-  ce qui reste raisonnable.  ε_fd = 1e-3 est un bon compromis précision/bruit.
-"""
 
 import numpy as np
 import torch
