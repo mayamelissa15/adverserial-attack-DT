@@ -1,0 +1,12 @@
+venv/
+results/
+artifacts/
+__pycache__/
+.streamlit/
+
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.npy
+*.csv

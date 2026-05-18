@@ -639,5 +639,4 @@ if __name__ == "__main__":
 
     with open(RESULTS_DIR / "whitebox_results.json", "w") as f:
         json.dump(out, f, indent=2)
-
     print(f"\nJSON sauvegardé → {RESULTS_DIR / 'whitebox_results.json'}")
