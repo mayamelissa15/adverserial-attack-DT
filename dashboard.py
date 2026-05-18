@@ -44,7 +44,8 @@ def load_all_results():
         key  = fname.replace("_results.json", "")
         path = RESULTS_DIR / fname
         data[key] = json.load(open(path)) if path.exists() else {}
-
+ 
+    # ← CHANGEMENT : defense_results.json (pas defense_whitebox_results.json)
     defense_path = RESULTS_DIR / "defense_results.json"
     data["defense"] = json.load(open(defense_path)) if defense_path.exists() else {}
     return data
@@ -76,22 +77,54 @@ def get_clean_accuracy(results):
     return {m: train.get(m, {}).get("clean_accuracy") for m in MODELS}
 
 
-def get_defense_df(defense_data, baseline_data):
+def get_defense_df(defense_data: dict, baseline_data: dict) -> pd.DataFrame:
+    """
+    Construit un DataFrame avec une ligne par (model, defense, attack).
+ 
+    Colonnes :
+      model, defense, attack,
+      asr_baseline  (depuis Baseline ou whitebox_results),
+      asr_defended  (depuis la défense active),
+      delta_asr, f1_defended, delta_f1, recall
+    """
     rows = []
+ 
     for model_name, defenses in defense_data.items():
+ 
+        # ── ASR baseline : depuis la clé "Baseline" ou whitebox_results ──
+        baseline_attacks = defenses.get("Baseline", {})
+ 
         for defense_name, attacks in defenses.items():
+            if defense_name == "Baseline":
+                # On ne crée pas de ligne pour Baseline lui-même,
+                # il sert uniquement de référence
+                continue
+ 
             for attack_name, metrics in attacks.items():
+                # ASR baseline : chercher dans Baseline d'abord,
+                # puis dans whitebox_results
                 asr_base = None
-                for cat_key in ["whitebox", "blackbox", "transfer"]:
-                    try:
-                        asr_base = baseline_data[cat_key][model_name][attack_name]["evasion_rate"]
-                        break
-                    except (KeyError, TypeError):
-                        continue
-
-                asr_def = metrics.get("evasion_rate")
-                delta_asr = round(asr_def - asr_base, 2) if (asr_def is not None and asr_base is not None) else None
-
+                if attack_name in baseline_attacks:
+                    asr_base = baseline_attacks[attack_name].get("evasion_rate")
+                else:
+                    for cat_key in ["whitebox", "blackbox", "transfer"]:
+                        try:
+                            asr_base = baseline_data[cat_key][model_name][attack_name]["evasion_rate"]
+                            break
+                        except (KeyError, TypeError):
+                            continue
+ 
+                asr_def  = metrics.get("evasion_rate")
+                f1_def   = metrics.get("f1")
+                delta_f1 = metrics.get("delta_f1")
+                recall   = metrics.get("recall")
+ 
+                delta_asr = (
+                    round(asr_def - asr_base, 2)
+                    if asr_def is not None and asr_base is not None
+                    else None
+                )
+ 
                 rows.append({
                     "model":        model_name,
                     "defense":      defense_name,
@@ -99,13 +132,83 @@ def get_defense_df(defense_data, baseline_data):
                     "asr_baseline": asr_base,
                     "asr_defended": asr_def,
                     "delta_asr":    delta_asr,
-                    "f1_defended":  metrics.get("f1"),
-                    "delta_f1":     metrics.get("delta_f1"),
-                    "recall":       metrics.get("recall"),
+                    "f1_defended":  f1_def,
+                    "delta_f1":     delta_f1,
+                    "recall":       recall,
                 })
-
+ 
     return pd.DataFrame(rows)
-
+ 
+ 
+# ══════════════════════════════════════════════════════════════
+# TEST RAPIDE (hors Streamlit)
+# ══════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    # Simule defense_results.json avec les vraies valeurs
+    defense_data = {
+        "MLP": {
+            "Baseline": {
+                "FGSM": {"evasion_rate": 26.2, "f1": 0.9337, "recall": 0.738},
+                "PGD":  {"evasion_rate": 29.7, "f1": 0.9337, "recall": 0.703},
+                "C&W":  {"evasion_rate": 30.4, "f1": 0.9337, "recall": 0.696},
+            },
+            "AT-FGSM": {
+                "FGSM": {"evasion_rate": 11.0, "f1": 0.8408, "recall": 0.890},
+                "PGD":  {"evasion_rate": 19.5, "f1": 0.8408, "recall": 0.805},
+                "C&W":  {"evasion_rate": 19.4, "f1": 0.8408, "recall": 0.806},
+            },
+            "AT-PGD": {
+                "FGSM": {"evasion_rate":  9.9, "f1": 0.8383, "recall": 0.901},
+                "PGD":  {"evasion_rate": 17.8, "f1": 0.8383, "recall": 0.822},
+                "C&W":  {"evasion_rate": 18.2, "f1": 0.8383, "recall": 0.818},
+            },
+        },
+        "LogReg": {
+            "Baseline": {
+                "FGSM": {"evasion_rate": 97.7, "f1": 0.4173, "recall": 0.023},
+                "PGD":  {"evasion_rate": 97.7, "f1": 0.4173, "recall": 0.023},
+                "C&W":  {"evasion_rate": 97.7, "f1": 0.4173, "recall": 0.023},
+            },
+            "Aug-FGSM": {
+                "FGSM": {"evasion_rate": 100.0, "f1": 0.6001, "recall": 0.0},
+                "PGD":  {"evasion_rate": 100.0, "f1": 0.6001, "recall": 0.0},
+                "C&W":  {"evasion_rate": 100.0, "f1": 0.6001, "recall": 0.0},
+            },
+            "Aug-PGD": {
+                "FGSM": {"evasion_rate": 100.0, "f1": 0.7437, "recall": 0.0},
+                "PGD":  {"evasion_rate": 100.0, "f1": 0.7437, "recall": 0.0},
+                "C&W":  {"evasion_rate": 100.0, "f1": 0.7437, "recall": 0.0},
+            },
+        },
+        "XGBoost": {
+            "Baseline": {
+                "FGSM": {"evasion_rate": 12.9, "f1": 0.9992, "recall": 0.871},
+                "PGD":  {"evasion_rate": 42.7, "f1": 0.9992, "recall": 0.573},
+                "C&W":  {"evasion_rate": 42.5, "f1": 0.9992, "recall": 0.575},
+            },
+            "Aug-proxy": {
+                "FGSM": {"evasion_rate":  0.1, "f1": 0.9972, "recall": 0.999},
+                "PGD":  {"evasion_rate": 36.2, "f1": 0.9972, "recall": 0.638},
+                "C&W":  {"evasion_rate": 37.1, "f1": 0.9972, "recall": 0.629},
+            },
+            "Aug-direct": {
+                "FGSM": {"evasion_rate":  0.3, "f1": 0.9974, "recall": 0.997},
+                "PGD":  {"evasion_rate": 36.9, "f1": 0.9974, "recall": 0.631},
+                "C&W":  {"evasion_rate": 37.4, "f1": 0.9974, "recall": 0.626},
+            },
+        },
+    }
+ 
+    df = get_defense_df(defense_data, {})
+    print(df.to_string())
+    print(f"\n{len(df)} lignes générées")
+ 
+    # Sauvegarde le JSON de test dans ~/swat/results/defense_results.json
+    out = Path("~/swat/results").expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / "defense_results.json", "w") as f:
+        json.dump(defense_data, f, indent=2)
+    print(f"\ndefense_results.json écrit → {out / 'defense_results.json'}")
 
 # ── Page layout ────────────────────────────────────────────────────────────────
 st.set_page_config(
