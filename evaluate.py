@@ -61,6 +61,7 @@ ATTACK_NAME_MAP = {
 MODEL_NAME_MAP = {
     "MLP":    "MLP",
     "LogReg": "LogReg",
+    "XGBoost": "XGBoost",
 }
 
 # Attaques whitebox — filtrées pour XGBoost (non différentiable)
@@ -114,6 +115,17 @@ def load_defended_models(input_size):
     else:
         print(f"  ✗ logreg_aug_fgsm.pkl introuvable — lance defenses.py d'abord")
 
+    #ici XGboost aug fgsm
+    from xgboost import XGBClassifier
+    from models import XGBoostWrapper
+
+    p = SAVE_DIR / "xgb_aug_fgsm.json"
+    if p.exists():
+        m = XGBClassifier()
+        m.load_model(str(p))
+        defended["XGBoost"] = {"Aug-FGSM": XGBoostWrapper(m)}
+        print(f"  ✓ XGBoost Aug-FGSM chargé")
+
     return defended
 
 
@@ -154,10 +166,7 @@ def scan_adv_files():
         else:
             continue
 
-        # Ignorer XGBoost complètement
-        if raw_model.lower() == "xgboost":
-            continue
-
+   
         model_clean  = MODEL_NAME_MAP.get(raw_model, raw_model)
         attack_clean = ATTACK_NAME_MAP.get(raw_attack, raw_attack.upper())
 
