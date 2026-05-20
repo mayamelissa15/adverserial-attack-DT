@@ -236,14 +236,11 @@ def augment_logreg(logreg_wrapper, X_train, y_train,
 # XGBoost non différentiable → pas de gradient direct.
 # On génère X_adv via le MLP AT (proxy), puis on refit XGBoost.
 # ══════════════════════════════════════════════════════════════
-
+"""
 def augment_xgboost(xgb_wrapper, mlp_proxy_wrapper,
                     X_train, y_train,
                     attack="fgsm", eps=EPS_AT):
-    """
-    Retourne un XGBoostWrapper réentraîné sur X_train + X_adv (proxy MLP).
-    Skip si le fichier .json existe déjà.
-    """
+    
     fname = f"xgb_aug_{attack}.json"
     fpath = SAVE_DIR / fname
 
@@ -288,8 +285,93 @@ def augment_xgboost(xgb_wrapper, mlp_proxy_wrapper,
 
     new_xgb.save_model(str(fpath))
     print(f"    Sauvegardé : {fpath}")
-    return XGBoostWrapper(new_xgb)
+    return XGBoostWrapper(new_xgb)"""
 
+# ══════════════════════════════════════════════════════════════
+# DÉFENSE 5 — ADVERSARIAL AUGMENTATION ITÉRATIVE XGBoost
+#
+# Contrairement à augment_xgboost() qui utilise un proxy MLP,
+# ici on génère X_adv directement sur XGBoost courant à chaque
+# round via gradient numérique (différences finies centrées).
+#
+# Round k :
+#   1. XGB_k génère X_adv via fgsm_xgb (grad numérique)
+#   2. On concat X_train + tous les X_adv vus jusqu'ici
+#   3. On refit → XGB_{k+1}
+#
+# Avantage vs proxy : les X_adv correspondent aux vraies
+# failles de XGBoost, pas à celles du MLP.
+# ══════════════════════════════════════════════════════════════
+
+def augment_xgboost_iterative(xgb_wrapper, X_train, y_train,
+                               attack="fgsm", eps=EPS_AT,
+                               n_rounds=3):
+    """
+    Adversarial augmentation itérative sur XGBoost.
+    Génère X_adv sur le modèle courant à chaque round (pas de proxy).
+    Skip si le fichier final existe déjà.
+    """
+    fname = f"xgb_iter_{attack}_r{n_rounds}.json"
+    fpath = SAVE_DIR / fname
+
+    if fpath.exists():
+        print(f"    {fname} déjà présent → chargement direct")
+        m = XGBClassifier()
+        m.load_model(str(fpath))
+        return XGBoostWrapper(m)
+
+    # Import des attaques XGBoost depuis whitebox.py
+    fgsm_xgb = wb.fgsm_xgb
+    pgd_xgb  = wb.pgd_xgb
+
+    current_wrapper = xgb_wrapper
+    X_aug = X_train.copy()
+    y_aug = y_train.copy()
+
+    mask  = (y_train == 1)
+    X_atk = X_train[mask].astype(np.float32)
+    y_atk = y_train[mask]
+
+    for r in range(1, n_rounds + 1):
+        print(f"\n    ── Round {r}/{n_rounds} ──────────────────────────")
+
+        # 1. Génère X_adv sur le modèle COURANT (pas de proxy)
+        print(f"    Génération X_adv sur XGB courant ({attack}, eps={eps})...")
+        if attack == "fgsm":
+            X_adv = fgsm_xgb(current_wrapper, X_atk, y_atk, eps=eps)
+        else:
+            X_adv = pgd_xgb(current_wrapper, X_atk, y_atk, eps=eps,
+                             iters=20, restarts=3)
+
+        # 2. Accumule — on garde tous les X_adv des rounds précédents
+        X_aug = np.concatenate([X_aug, X_adv], axis=0)
+        y_aug = np.concatenate([y_aug, y_atk], axis=0)
+        print(f"    Dataset cumulé : {len(X_aug)} exemples")
+
+        # 3. Refit XGBoost sur le dataset augmenté
+        scale_pw = float((y_aug == 0).sum()) / float((y_aug == 1).sum())
+        new_xgb  = XGBClassifier(
+            n_estimators=500, max_depth=6, learning_rate=0.1,
+            subsample=0.8, colsample_bytree=0.8,
+            scale_pos_weight=scale_pw,
+            eval_metric="logloss", early_stopping_rounds=20,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            random_state=42, verbosity=0
+        )
+        split = int(0.9 * len(X_aug))
+        new_xgb.fit(
+            X_aug[:split], y_aug[:split],
+            eval_set=[(X_aug[split:], y_aug[split:])],
+            verbose=False
+        )
+
+        current_wrapper = XGBoostWrapper(new_xgb)
+        print(f"    XGB_round{r} fitté ✓")
+
+    # Sauvegarde du modèle final
+    current_wrapper.model.save_model(str(fpath))
+    print(f"\n    Sauvegardé : {fpath}")
+    return current_wrapper
 
 # ══════════════════════════════════════════════════════════════
 # MAIN
@@ -319,14 +401,18 @@ def run():
     print("\n[3/4] Adversarial Augmentation FGSM — LogReg")
     logreg_aug = augment_logreg(logreg_w, X_train, y_train, attack="fgsm")
 
-    print("\n[4/4] Adversarial Augmentation FGSM — XGBoost (proxy = AT-FGSM MLP)")
-    xgb_aug = augment_xgboost(xgb_w, mlp_at_fgsm, X_train, y_train, attack="fgsm")
+    """print("\n[4/4] Adversarial Augmentation FGSM ( basique )— XGBoost (proxy = AT-FGSM MLP)")
+    xgb_aug = augment_xgboost(xgb_w, mlp_at_fgsm, X_train, y_train, attack="fgsm")"""
+
+    #on debug avec ca 
+    print("\n[5/5] Adversarial Augmentation Itérative FGSM — XGBoost (self, 3 rounds)")
+    xgb_iter = augment_xgboost_iterative( xgb_w, X_train, y_train, attack="fgsm", eps=EPS_AT, n_rounds=3)
 
     print("\n" + "═"*60)
     print("  DONE — lance maintenant evaluate.py")
     print("═"*60)
 
-    return mlp_at_fgsm, mlp_at_pgd, logreg_aug, xgb_aug
+    return mlp_at_fgsm, mlp_at_pgd, logreg_aug, xgb_iter
 
 
 if __name__ == "__main__":

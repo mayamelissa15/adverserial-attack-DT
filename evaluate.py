@@ -83,7 +83,7 @@ def load_defended_models(input_size):
         "LogReg": {"Aug-FGSM": wrapper},
       }
     """
-    defended = {"MLP": {}, "LogReg": {}}
+    defended = {"MLP": {}, "LogReg": {} , "XGBoost":{}}
 
     # MLP AT-FGSM
     p = SAVE_DIR / "mlp_at_fgsm.pt"
@@ -118,14 +118,25 @@ def load_defended_models(input_size):
     #ici XGboost aug fgsm
     from xgboost import XGBClassifier
     from models import XGBoostWrapper
-
+    """
     p = SAVE_DIR / "xgb_aug_fgsm.json"
     if p.exists():
         m = XGBClassifier()
         m.load_model(str(p))
         defended["XGBoost"] = {"Aug-FGSM": XGBoostWrapper(m)}
         print(f"  ✓ XGBoost Aug-FGSM chargé")
+    """
 
+    # XGBoost Aug-FGSM Itératif (option 2)
+    p = SAVE_DIR / "xgb_iter_fgsm_r3.json"
+    if p.exists():
+        m = XGBClassifier()
+        m.load_model(str(p))
+        defended["XGBoost"]["Aug-FGSM-Iter"] = XGBoostWrapper(m)
+        print(f"  ✓ XGBoost Aug-FGSM-Iter chargé")
+    else:
+        print(f"  ✗ xgb_iter_fgsm_r3.json introuvable — lance defenses.py d'abord")
+        
     return defended
 
 
