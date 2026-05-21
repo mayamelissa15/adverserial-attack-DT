@@ -27,7 +27,44 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+# ══════════════════════════════════════════════════════════════
+# ARCHITECTURES SUBSTITUTS
+# ══════════════════════════════════════════════════════════════
 
+class SmallMLP(nn.Module):
+    """
+    MLP plus petit que MLP — substitut léger.
+    Architecture : input → 64 → 32 → 1 (logit)
+    """
+    def __init__(self, input_size):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, 64), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(64, 32),         nn.ReLU(),
+            nn.Linear(32, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class DeepMLP(nn.Module):
+    """
+    MLP plus profond que MLP — substitut expressif.
+    Architecture : input → 256 → 128 → 64 → 32 → 1 (logit)
+    """
+    def __init__(self, input_size):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, 256), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(256, 128),        nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(128, 64),         nn.ReLU(), nn.Dropout(0.2),
+            nn.Linear(64, 32),          nn.ReLU(),
+            nn.Linear(32, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
 # ══════════════════════════════════════════════════════════════
 # WRAPPER MLP
 # ══════════════════════════════════════════════════════════════
@@ -91,6 +128,9 @@ class LogRegWrapper:
         p    = 1 / (1 + np.exp(-self.logits_np(X)))  # (N,)
         return (p - y)[:, None] * self.model.coef_    # (N, D)
 
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)[:, 1]
+        
     def grad_logit(self, X):
         """
         Gradient du logit par rapport à x :
