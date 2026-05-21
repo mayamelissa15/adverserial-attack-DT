@@ -16,7 +16,7 @@ RESULTS_DIR = Path("~/swat/results").expanduser()
 MODELS = ["MLP", "LogReg", "XGBoost"]
 WHITEBOX_ATTACKS  = ["FGSM", "PGD", "CW"]
 BLACKBOX_ATTACKS  = ["Square", "NES", "HSJA", "RayS"]
-TRANSFER_ATTACKS  = ["MI-FGSM", "VMI-FGSM", "Ensemble-VMI"]
+TRANSFER_ATTACKS  = ["MI-FGSM", "VMI-FGSM", "Ensemble-MI"]
 ALL_ATTACKS = WHITEBOX_ATTACKS + BLACKBOX_ATTACKS + TRANSFER_ATTACKS
 
 COLOR_MAP = {

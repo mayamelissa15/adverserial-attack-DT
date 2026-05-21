@@ -141,58 +141,8 @@ def mi_fgsm(sub_wrapper, X_atk, y_atk, eps, iters=ITERS, mu=1.0):
 
     return x_adv.cpu().numpy()
 
-
-# ─────────────────────────────────────────────
-# VMI-FGSM
-# ─────────────────────────────────────────────
-
-def vmi_fgsm(sub_wrapper, X_atk, y_atk, eps,
-             iters=ITERS, mu=1.0, beta=1.5, n_neighbors=20):
-    alpha  = 2 * eps / iters
-    device = sub_wrapper.device
-    x_orig = torch.tensor(X_atk, dtype=torch.float32, device=device)
-    y_t    = torch.tensor(y_atk, dtype=torch.float32, device=device).view(-1, 1)
-    x_adv  = x_orig.clone()
-    g      = torch.zeros_like(x_orig)
-
-    sub_wrapper.model.eval()
-
-    for _ in range(iters):
-        x_adv_d = x_adv.detach()
-
-        x_inp  = x_adv_d.requires_grad_(True)
-        logits = sub_wrapper.model(x_inp)
-        loss   = nn.functional.binary_cross_entropy_with_logits(logits, y_t, reduction='sum')
-        loss.backward()
-        grad_cur = x_inp.grad.data.clone()
-
-        grad_neigh = torch.zeros_like(grad_cur)
-        for _ in range(n_neighbors):
-            noise    = torch.empty_like(x_adv_d).uniform_(-beta * eps, beta * eps)
-            x_n      = (x_adv_d + noise).detach().requires_grad_(True)
-            logits_n = sub_wrapper.model(x_n)
-            loss_n   = nn.functional.binary_cross_entropy_with_logits(logits_n, y_t, reduction='sum')
-            loss_n.backward()
-            grad_neigh += x_n.grad.data
-        grad_neigh /= n_neighbors
-
-        grad_var  = grad_cur - grad_neigh
-        grad_used = grad_cur + beta * grad_var
-        grad_norm = grad_used / (grad_used.abs().sum(dim=1, keepdim=True) + 1e-12)
-        g         = mu * g + grad_norm
-        x_adv     = x_adv_d + alpha * g.sign()
-        x_adv     = torch.clamp(x_adv, x_orig - eps, x_orig + eps).detach()
-
-    return x_adv.cpu().numpy()
-
-
-# ─────────────────────────────────────────────
-# ENSEMBLE VMI-FGSM
-# ─────────────────────────────────────────────
-
-def ensemble_vmi_fgsm(sub_wrappers, X_atk, y_atk, eps,
-                      iters=ITERS, mu=1.0, beta=1.5, n_neighbors=10,
-                      weights=None):
+def ensemble_mi_fgsm(sub_wrappers, X_atk, y_atk, eps,
+                     iters=ITERS, mu=1.0, weights=None):
     if weights is None:
         weights = [1.0 / len(sub_wrappers)] * len(sub_wrappers)
     alpha  = 2 * eps / iters
@@ -212,23 +162,11 @@ def ensemble_vmi_fgsm(sub_wrappers, X_atk, y_atk, eps,
         for w, sub in zip(weights, sub_wrappers):
             x_inp  = x_adv_d.requires_grad_(True)
             logits = sub.model(x_inp)
-            loss   = nn.functional.binary_cross_entropy_with_logits(logits, y_t, reduction='sum')
+            loss   = nn.functional.binary_cross_entropy_with_logits(
+                         logits, y_t, reduction='sum')
             loss.backward()
             grad_cur = x_inp.grad.data.clone()
-
-            grad_neigh = torch.zeros_like(grad_cur)
-            for _ in range(n_neighbors):
-                noise    = torch.empty_like(x_adv_d).uniform_(-beta * eps, beta * eps)
-                x_n      = (x_adv_d + noise).detach().requires_grad_(True)
-                logits_n = sub.model(x_n)
-                loss_n   = nn.functional.binary_cross_entropy_with_logits(logits_n, y_t, reduction='sum')
-                loss_n.backward()
-                grad_neigh += x_n.grad.data
-            grad_neigh /= n_neighbors
-
-            grad_var   = grad_cur - grad_neigh
-            grad_used  = grad_cur + beta * grad_var
-            grad_norm  = grad_used / (grad_used.abs().sum(dim=1, keepdim=True) + 1e-12)
+            grad_norm = grad_cur / (grad_cur.abs().sum(dim=1, keepdim=True) + 1e-12)
             grad_ensemble += w * grad_norm
 
         g     = mu * g + grad_ensemble
@@ -237,13 +175,118 @@ def ensemble_vmi_fgsm(sub_wrappers, X_atk, y_atk, eps,
 
     return x_adv.cpu().numpy()
 
-
-
 # ─────────────────────────────────────────────
-# SAUVEGARDE X_ADV — tous les substituts
-# Convention : adv_{attaque}_{victime}_sub_{substitut}_eps{eps}.npy
+# VMI-FGSM
 # ─────────────────────────────────────────────
 
+def vmi_fgsm(sub_wrapper, X_atk, y_atk, eps,
+             iters=ITERS, mu=1.0, beta=0.3, n_neighbors=10):
+    alpha  = 2 * eps / iters
+    device = sub_wrapper.device
+    x_orig = torch.tensor(X_atk, dtype=torch.float32, device=device)
+    y_t    = torch.tensor(y_atk, dtype=torch.float32, device=device).view(-1, 1)
+    x_adv  = x_orig.clone()
+    g      = torch.zeros_like(x_orig)
+
+    sub_wrapper.model.eval()
+
+    for _ in range(iters):
+        x_adv_d = x_adv.detach()
+
+        # Gradient au point courant
+        x_inp  = x_adv_d.requires_grad_(True)
+        logits = sub_wrapper.model(x_inp)
+        loss   = nn.functional.binary_cross_entropy_with_logits(
+                     logits, y_t, reduction='sum')
+        loss.backward()
+        grad_cur = x_inp.grad.data.clone()
+
+        # Moyenne des gradients dans le voisinage
+        grad_neigh = torch.zeros_like(grad_cur)
+        for _ in range(n_neighbors):
+            noise    = torch.empty_like(x_adv_d).uniform_(-beta * eps, beta * eps)
+            x_n      = (x_adv_d + noise).detach().requires_grad_(True)
+            logits_n = sub_wrapper.model(x_n)
+            loss_n   = nn.functional.binary_cross_entropy_with_logits(
+                           logits_n, y_t, reduction='sum')
+            loss_n.backward()
+            grad_neigh += x_n.grad.data
+        grad_neigh /= n_neighbors
+
+        # Correction de variance
+        grad_var  = grad_cur - grad_neigh
+        grad_used = grad_cur + beta * grad_var
+
+        # CORRECTION : normaliser grad_cur et grad_var séparément
+        # pour éviter les annulations qui explosent la norme L1
+        #we are debugging here 
+
+        grad_used = grad_cur + beta * (grad_cur - grad_neigh)
+        grad_used_norm = grad_used / (grad_used.abs().sum(dim=1, keepdim=True) + 1e-12)
+
+        g     = mu * g + grad_used_norm
+
+        x_adv = x_adv_d + alpha * g.sign()
+        x_adv = torch.clamp(x_adv, x_orig - eps, x_orig + eps).detach()
+
+    return x_adv.cpu().numpy()
+
+
+def ensemble_vmi_fgsm(sub_wrappers, X_atk, y_atk, eps,
+                      iters=ITERS, mu=1.0, beta=0.3, n_neighbors=10,
+                      weights=None):
+    # n_neighbors=20 au lieu de 10 — cohérent avec vmi_fgsm seul
+    if weights is None:
+        weights = [1.0 / len(sub_wrappers)] * len(sub_wrappers)
+    alpha  = 2 * eps / iters
+    device = sub_wrappers[0].device
+    x_orig = torch.tensor(X_atk, dtype=torch.float32, device=device)
+    y_t    = torch.tensor(y_atk, dtype=torch.float32, device=device).view(-1, 1)
+    x_adv  = x_orig.clone()
+    g      = torch.zeros_like(x_orig)
+
+    for sub in sub_wrappers:
+        sub.model.eval()
+
+    for _ in range(iters):
+        x_adv_d       = x_adv.detach()
+        grad_ensemble = torch.zeros_like(x_orig)
+
+        for w, sub in zip(weights, sub_wrappers):
+            x_inp  = x_adv_d.requires_grad_(True)
+            logits = sub.model(x_inp)
+            loss   = nn.functional.binary_cross_entropy_with_logits(
+                         logits, y_t, reduction='sum')
+            loss.backward()
+            grad_cur = x_inp.grad.data.clone()
+
+            grad_neigh = torch.zeros_like(grad_cur)
+            for _ in range(n_neighbors):
+                noise    = torch.empty_like(x_adv_d).uniform_(-beta * eps, beta * eps)
+                x_n      = (x_adv_d + noise).detach().requires_grad_(True)
+                logits_n = sub.model(x_n)
+                loss_n   = nn.functional.binary_cross_entropy_with_logits(
+                               logits_n, y_t, reduction='sum')
+                loss_n.backward()
+                grad_neigh += x_n.grad.data
+            grad_neigh /= n_neighbors
+
+            grad_var  = grad_cur - grad_neigh
+
+            # CORRECTION : même normalisation séparée que vmi_fgsm
+            grad_used = grad_cur + beta * (grad_cur - grad_neigh)
+            grad_used_norm = grad_used / (grad_used.abs().sum(dim=1, keepdim=True) + 1e-12)
+
+            grad_ensemble += w * grad_used_norm
+
+        g     = mu * g + grad_ensemble
+        x_adv = x_adv_d + alpha * g.sign()
+        x_adv = torch.clamp(x_adv, x_orig - eps, x_orig + eps).detach()
+
+    return x_adv.cpu().numpy()
+
+
+    
 def save_all_adv(adv_store, eps):
     """
     vu qu'on a eu un probleme ( le asr apres avoir ete defendu est plus elevé que avant ce qui est illogique ) on Sauvegarde TOUS les X_adv générés, un fichier par (attaque, substitut, victime).
@@ -434,13 +477,13 @@ def run():
     print(f"{'─'*60}")
     X_adv_ens = ensemble_vmi_fgsm(
         [sub1, sub2, sub3], X_atk, y_atk, eps=EPS,
-        weights=[0.2, 0.3, 0.5]
+        weights=[1/3, 1/3, 1/3]
     )
-    adv_store[("Ensemble(S1+S2+S3)", "Ensemble-VMI")] = X_adv_ens
+    adv_store[("Ensemble(S1+S2+S3)", "Ensemble-MI")] = X_adv_ens
 
     for vic_name, vic_w in victims:
         results.append(eval_transfer(X_eval, y_eval, X_adv_ens,
-                                     vic_w, "Ensemble(S1+S2+S3)", vic_name, "Ensemble-VMI"))
+                                     vic_w, "Ensemble(S1+S2+S3)", vic_name, "Ensemble-MI"))
 
     df = pd.DataFrame(results)
     df.to_csv(SAVE_DIR / "transfer_results.csv", index=False)
