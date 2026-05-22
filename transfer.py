@@ -475,7 +475,7 @@ def run():
     print(f"\n{'─'*60}")
     print("Ensemble VMI-FGSM (Sub1+Sub2+Sub3)")
     print(f"{'─'*60}")
-    X_adv_ens = ensemble_vmi_fgsm(
+    X_adv_ens = ensemble_mi_fgsm(
         [sub1, sub2, sub3], X_atk, y_atk, eps=EPS,
         weights=[1/3, 1/3, 1/3]
     )

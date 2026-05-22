@@ -56,8 +56,8 @@ ATTACK_NAME_MAP = {
     "vmi-fgsm":     "VMI-FGSM",
      "ensemble_mi":  "Ensemble-MI",   # debug debug
     "ensemble-mi":  "Ensemble-MI",
-    "ensemble_vmi": "Ensemble-VMI",
-    "ensemble-vmi": "Ensemble-VMI",
+    #"ensemble_vmi": "Ensemble-VMI",
+    #"ensemble-vmi": "Ensemble-VMI",
 }
 
 MODEL_NAME_MAP = {
