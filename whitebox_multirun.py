@@ -1,26 +1,20 @@
-# ~/swat/run_whitebox_multirun.py
+# whitebox_multirun.py
 """
-Multi-run whitebox attacks — même pattern que run_experiments_fast.py.
+Whitebox multi-run — SWaT et BATADAL, eps 0.1 et 0.3.
 
-Pourquoi multi-run pour le whitebox ?
-─────────────────────────────────────
-Les attaques whitebox sont déterministes une fois le seed fixé, mais
-l'eval set varie selon le seed (build_shared_eval sélectionne 500 TP
-communs parmi les vrais positifs détectés par les 3 modèles).
-Faire N_RUNS seeds permet donc de :
-  - mesurer la variance de l'ASR sur différents sous-ensembles de TP,
-  - produire des boxplots avec whiskers pour l'article,
-  - s'assurer que les résultats ne dépendent pas du choix de l'eval set.
+Usage :
+  python whitebox_multirun.py --dataset swat   --eps 0.1
+  python whitebox_multirun.py --dataset swat   --eps 0.3
+  python whitebox_multirun.py --dataset batadal --eps 0.1
+  python whitebox_multirun.py --dataset batadal --eps 0.3
 
-FAST_MODE (recommandé pour le multi-run)
-─────────────────────────────────────────
-PGD complet (200 iters × 10 restarts) × 10 seeds = ~6h sur CPU.
-FAST_MODE=True réduit à 50 iters × 3 restarts : résultats légèrement
-inférieurs mais tout à fait publiables pour la variance, et ~7× plus rapide.
-Mettre FAST_MODE=False pour la run "best effort" finale (1 seed suffit,
-utiliser run_whitebox.py original à ce moment-là).
+Sorties :
+  ~/<dataset>/results/whitebox_multirun_<dataset>_eps<eps>.csv
+  ~/<dataset>/results/whitebox_multirun_<dataset>_eps<eps>.json
+  ~/<dataset>/results/whitebox_multirun_<dataset>_eps<eps>_tmp.csv  (checkpoint)
 """
 
+import argparse
 import numpy as np
 import torch
 import joblib
@@ -37,54 +31,67 @@ sys.path.append(str(Path(__file__).parent))
 
 from models import (MLP, MLPWrapper, LogRegWrapper, XGBoostWrapper,
                     build_eval_set, eval_attack)
-
-# Import des fonctions d'attaque depuis run_whitebox
-# (on les importe directement pour éviter la duplication)
 from whitebox import (
     fgsm_mlp, fgsm_logreg, fgsm_xgb,
     pgd_mlp,  pgd_logreg,  pgd_xgb,
     cw_mlp,   cw_logreg,   cw_xgb,
-    THRESHOLD_LOGIT, EPS_FD, CW_LR_XGB, CW_LR_LR, CW_ITERS,
+    THRESHOLD_LOGIT, EPS_FD, CW_LR_XGB, CW_LR_LR,
     PGD_ALPHA_K,
 )
 
 # ══════════════════════════════════════════════════════════════
-# CONFIG
+# ARGUMENTS
 # ══════════════════════════════════════════════════════════════
 
-SAVE_DIR    = Path("~/swat/artifacts").expanduser()
-RESULTS_DIR = Path("~/swat/results").expanduser()
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset",  default="swat",
+                    choices=["swat", "batadal"],
+                    help="Dataset cible")
+parser.add_argument("--eps",      default=0.1,  type=float,
+                    help="Epsilon L∞ (0.1 ou 0.3)")
+parser.add_argument("--n_runs",   default=10,   type=int,
+                    help="Nombre de seeds")
+parser.add_argument("--fast",     action="store_true",
+                    help="FAST_MODE : PGD 50×3 au lieu de 200×10")
+args = parser.parse_args()
+
+DATASET  = args.dataset
+EPS      = args.eps
+N_RUNS   = args.n_runs
+FAST     = args.fast
+
+# ── Chemins selon dataset ──────────────────────────────────────
+SAVE_DIR    = Path(f"~/{DATASET}/artifacts").expanduser()
+RESULTS_DIR = Path(f"~/{DATASET}/results").expanduser()
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-DEVICE  = "cuda" if torch.cuda.is_available() else "cpu"
-EPS     = 0.3       # epsilon unique pour le multi-run (cohérent avec blackbox)
-N_RUNS  = 10
-SEEDS   = list(range(N_RUNS))
+TAG = f"{DATASET}_eps{EPS}"   # utilisé dans tous les noms de fichiers
 
-# ── FAST_MODE ──────────────────────────────────────────────────
-# True  → PGD 50 iters × 3 restarts  (~7× plus rapide, pour la variance)
-# False → PGD 200 iters × 10 restarts (paramètres complets, ~6h CPU)
-FAST_MODE = True
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+SEEDS  = list(range(N_RUNS))
 
-PGD_ITERS_FAST    = 50
-PGD_RESTARTS_FAST = 3
-PGD_ITERS_FULL    = 200
-PGD_RESTARTS_FULL = 10
+# ── Hyperparamètres PGD / C&W selon FAST_MODE ─────────────────
+PGD_ITERS    = 50  if FAST else 200
+PGD_RESTARTS = 3   if FAST else 10
+CW_ITERS     = 150 if FAST else 500
 
-# C&W : on réduit aussi les iters en FAST_MODE
-CW_ITERS_FAST = 150
-CW_ITERS_FULL = 500
+# ── Taille eval set selon dataset ─────────────────────────────
+# SWaT  : beaucoup d'attaques → 500
+# BATADAL : seulement 219 attaques en test → 200 max
+EVAL_ATK_SIZE = 200 if DATASET == "batadal" else 500
+EVAL_NRM_SIZE = 500
 
-print(f"Device   : {DEVICE}")
-print(f"EPS      : {EPS}")
-print(f"N_RUNS   : {N_RUNS}")
-print(f"FAST_MODE: {FAST_MODE}")
-if FAST_MODE:
-    print(f"  PGD    : {PGD_ITERS_FAST} iters × {PGD_RESTARTS_FAST} restarts")
-    print(f"  C&W    : {CW_ITERS_FAST} iters")
-else:
-    print(f"  PGD    : {PGD_ITERS_FULL} iters × {PGD_RESTARTS_FULL} restarts")
-    print(f"  C&W    : {CW_ITERS_FULL} iters")
+print(f"\n{'═'*55}")
+print(f"  Dataset  : {DATASET.upper()}")
+print(f"  Epsilon  : {EPS}")
+print(f"  N_RUNS   : {N_RUNS}")
+print(f"  Device   : {DEVICE}")
+print(f"  FAST     : {FAST}")
+print(f"  PGD      : {PGD_ITERS} iters × {PGD_RESTARTS} restarts")
+print(f"  C&W      : {CW_ITERS} iters")
+print(f"  Eval atk : {EVAL_ATK_SIZE} exemples max")
+print(f"  Sorties  : {RESULTS_DIR}")
+print(f"{'═'*55}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -96,7 +103,8 @@ def load_victims():
     y_test = np.load(SAVE_DIR / "y_test.npy")
 
     mlp_model = MLP(input_size=X_test.shape[1]).to(DEVICE)
-    mlp_model.load_state_dict(torch.load(SAVE_DIR / "best_mlp.pt", map_location=DEVICE))
+    mlp_model.load_state_dict(
+        torch.load(SAVE_DIR / "best_mlp.pt", map_location=DEVICE))
     mlp_model.eval()
     mlp_w = MLPWrapper(mlp_model, DEVICE)
 
@@ -106,19 +114,23 @@ def load_victims():
     xgb_model.load_model(str(SAVE_DIR / "xgb.json"))
     xgb_w = XGBoostWrapper(xgb_model)
 
+    print(f"\n✓ Modèles chargés depuis {SAVE_DIR}")
+    print(f"  X_test : {X_test.shape} — attaques : {y_test.sum()} / {len(y_test)}")
+
     return X_test, y_test, mlp_w, logreg_w, xgb_w
 
 
 # ══════════════════════════════════════════════════════════════
-# EVAL SET COMMUN AUX 3 MODÈLES (copié depuis run_experiments_fast)
+# EVAL SET COMMUN AUX 3 MODÈLES
 # ══════════════════════════════════════════════════════════════
 
-def build_shared_eval(X_test, y_test, mlp_w, logreg_w, xgb_w, seed=42):
+def build_shared_eval(X_test, y_test, mlp_w, logreg_w, xgb_w, seed):
     """
-    Sélectionne un eval set commun : 500 normaux + 500 TP détectés
-    correctement par les 3 modèles simultanément.
-    Même fonction que dans run_experiments_fast.py pour garantir
-    la comparabilité des résultats blackbox ↔ whitebox.
+    Sélectionne un eval set commun : normaux + TP détectés correctement
+    par les 3 modèles simultanément.
+
+    EVAL_ATK_SIZE est adapté au dataset (200 pour BATADAL, 500 pour SWaT)
+    pour éviter replace=True sur un petit pool d'attaques.
     """
     rng        = np.random.default_rng(seed)
     idx_normal = np.where(y_test == 0)[0]
@@ -130,8 +142,16 @@ def build_shared_eval(X_test, y_test, mlp_w, logreg_w, xgb_w, seed=42):
     ok_mask      = (preds_mlp == 1) & (preds_logreg == 1) & (preds_xgb == 1)
     idx_attack_ok = idx_attack[ok_mask]
 
-    sel_n  = rng.choice(idx_normal,    size=500, replace=False)
-    sel_a  = rng.choice(idx_attack_ok, size=min(500, len(idx_attack_ok)), replace=False)
+    n_atk = min(EVAL_ATK_SIZE, len(idx_attack_ok))
+    n_nrm = min(EVAL_NRM_SIZE, len(idx_normal))
+
+    if n_atk == 0:
+        raise ValueError(
+            f"Aucun TP commun aux 3 modèles sur {DATASET} ! "
+            "Vérifier les F1 des modèles entraînés.")
+
+    sel_n  = rng.choice(idx_normal,    size=n_nrm, replace=False)
+    sel_a  = rng.choice(idx_attack_ok, size=n_atk, replace=False)
     idx_ev = np.concatenate([sel_n, sel_a])
     rng.shuffle(idx_ev)
 
@@ -155,48 +175,35 @@ def set_all_seeds(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def _pgd_iters():
-    return PGD_ITERS_FAST    if FAST_MODE else PGD_ITERS_FULL
-
-def _pgd_restarts():
-    return PGD_RESTARTS_FAST if FAST_MODE else PGD_RESTARTS_FULL
-
-def _cw_iters():
-    return CW_ITERS_FAST     if FAST_MODE else CW_ITERS_FULL
-
-
 # ══════════════════════════════════════════════════════════════
 # BOUCLE PRINCIPALE
 # ══════════════════════════════════════════════════════════════
 
 def run():
-    print("\nChargement des victimes...")
     X_test, y_test, mlp_w, logreg_w, xgb_w = load_victims()
 
     victims = [
-        ("MLP",     mlp_w,    "mlp"),
-        ("LogReg",  logreg_w, "lr"),
-        ("XGBoost", xgb_w,    "xgb"),
+        ("MLP",     mlp_w,    False, False),
+        ("LogReg",  logreg_w, True,  False),
+        ("XGBoost", xgb_w,    False, True),
     ]
 
     all_results = []
 
     for seed in SEEDS:
         print(f"\n{'═'*55}")
-        print(f"  SEED {seed} / {N_RUNS - 1}")
+        print(f"  SEED {seed+1}/{N_RUNS}  —  {DATASET.upper()}  eps={EPS}")
         print(f"{'═'*55}")
 
         set_all_seeds(seed)
         X_eval, y_eval, X_atk, y_atk = build_shared_eval(
-            X_test, y_test, mlp_w, logreg_w, xgb_w, seed=seed
-        )
+            X_test, y_test, mlp_w, logreg_w, xgb_w, seed=seed)
+
         print(f"  Eval set : {len(X_eval)} exemples "
               f"({(y_eval==1).sum()} attaques, {(y_eval==0).sum()} normaux)")
 
-        for vic_name, vic_w, vic_tag in victims:
+        for vic_name, vic_w, is_lr, is_xgb in victims:
             print(f"\n  ── {vic_name} {'─'*(45-len(vic_name))}")
-            is_lr  = (vic_name == "LogReg")
-            is_xgb = (vic_name == "XGBoost")
 
             # ── FGSM ──────────────────────────────────────────
             print("  [FGSM]")
@@ -207,93 +214,96 @@ def run():
                 X_adv = fgsm_xgb(vic_w, X_atk, y_atk, EPS)
             else:
                 X_adv = fgsm_mlp(vic_w, X_atk, y_atk, EPS)
-
             r = eval_attack(vic_w, X_eval, y_eval, X_adv, "FGSM", vic_name)
-            r["seed"]   = seed
-            r["family"] = "Whitebox"
-            r["eps"]    = EPS
+            r.update({"seed": seed, "family": "Whitebox",
+                      "eps": EPS, "dataset": DATASET})
             all_results.append(r)
-            print(f"    ASR = {r['asr']*100:.1f}%  F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
+            print(f"    ASR={r['asr']*100:.1f}%  "
+                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
 
             # ── PGD ───────────────────────────────────────────
             print("  [PGD]")
             set_all_seeds(seed)
-            iters    = _pgd_iters()
-            restarts = _pgd_restarts()
-            alpha    = EPS / PGD_ALPHA_K
-
+            alpha = EPS / PGD_ALPHA_K
             if is_lr:
                 X_adv = pgd_logreg(vic_w, X_atk, y_atk, EPS,
-                                   iters=iters, restarts=restarts, alpha=alpha)
+                                   iters=PGD_ITERS, restarts=PGD_RESTARTS,
+                                   alpha=alpha)
             elif is_xgb:
                 X_adv = pgd_xgb(vic_w, X_atk, y_atk, EPS,
-                                iters=iters, restarts=restarts, alpha=alpha)
+                                iters=PGD_ITERS, restarts=PGD_RESTARTS,
+                                alpha=alpha)
             else:
                 X_adv = pgd_mlp(vic_w, X_atk, y_atk, EPS,
-                                iters=iters, restarts=restarts, alpha=alpha)
-
+                                iters=PGD_ITERS, restarts=PGD_RESTARTS,
+                                alpha=alpha)
             r = eval_attack(vic_w, X_eval, y_eval, X_adv, "PGD", vic_name)
-            r["seed"]   = seed
-            r["family"] = "Whitebox"
-            r["eps"]    = EPS
+            r.update({"seed": seed, "family": "Whitebox",
+                      "eps": EPS, "dataset": DATASET})
             all_results.append(r)
-            print(f"    ASR = {r['asr']*100:.1f}%  F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
+            print(f"    ASR={r['asr']*100:.1f}%  "
+                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
 
             # ── C&W ───────────────────────────────────────────
             print("  [C&W]")
             set_all_seeds(seed)
-            cw_iters = _cw_iters()
-
             if is_lr:
-                X_adv = cw_logreg(vic_w, X_atk, y_atk, EPS, iters=cw_iters)
+                X_adv = cw_logreg(vic_w, X_atk, y_atk, EPS, iters=CW_ITERS)
             elif is_xgb:
-                X_adv = cw_xgb(vic_w, X_atk, y_atk, EPS, iters=cw_iters)
+                X_adv = cw_xgb(vic_w, X_atk, y_atk, EPS, iters=CW_ITERS)
             else:
-                X_adv = cw_mlp(vic_w, X_atk, y_atk, EPS, iters=cw_iters)
-
+                X_adv = cw_mlp(vic_w, X_atk, y_atk, EPS, iters=CW_ITERS)
             r = eval_attack(vic_w, X_eval, y_eval, X_adv, "C&W", vic_name)
-            r["seed"]   = seed
-            r["family"] = "Whitebox"
-            r["eps"]    = EPS
+            r.update({"seed": seed, "family": "Whitebox",
+                      "eps": EPS, "dataset": DATASET})
             all_results.append(r)
-            print(f"    ASR = {r['asr']*100:.1f}%  F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
+            print(f"    ASR={r['asr']*100:.1f}%  "
+                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
 
-        # Sauvegarde intermédiaire après chaque seed
-        df_tmp = pd.DataFrame(all_results)
-        df_tmp.to_csv(RESULTS_DIR / "whitebox_multirun_tmp.csv", index=False)
-        print(f"\n  ✓ Seed {seed} terminé — {len(all_results)} résultats cumulés")
+        # ── Checkpoint après chaque seed ──────────────────────
+        pd.DataFrame(all_results).to_csv(
+            RESULTS_DIR / f"whitebox_multirun_{TAG}_tmp.csv", index=False)
+        print(f"\n  ✓ Checkpoint seed {seed} sauvegardé")
 
-    # ── Sauvegarde finale ──────────────────────────────────────
+    # ══════════════════════════════════════════════════════════
+    # SAUVEGARDE FINALE
+    # ══════════════════════════════════════════════════════════
+
     df = pd.DataFrame(all_results)
-    df.to_csv(RESULTS_DIR / "whitebox_multirun_results.csv", index=False)
-    print(f"\n✓ CSV final → {RESULTS_DIR / 'whitebox_multirun_results.csv'}")
+    csv_path = RESULTS_DIR / f"whitebox_multirun_{TAG}.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\n✓ CSV → {csv_path}")
 
-    # ── Résumé médiane ± std ───────────────────────────────────
+    # ── Résumé console ────────────────────────────────────────
     summary = (df.groupby(["attack", "model"])["asr"]
                  .agg(["median", "std", "min", "max"])
                  .round(4))
-    print("\n=== RÉSUMÉ WHITEBOX MULTI-RUN ===")
+    print(f"\n{'═'*55}")
+    print(f"  RÉSUMÉ — {DATASET.upper()}  eps={EPS}")
+    print(f"{'═'*55}")
     print(summary.to_string())
 
-    # ── Export JSON (même format que whitebox_results.json) ────
+    # ── Export JSON ───────────────────────────────────────────
     out = {}
     for model_name in df["model"].unique():
         out[model_name] = {}
         sub = df[df["model"] == model_name]
         for attack_name in sub["attack"].unique():
-            rows = sub[sub["attack"] == attack_name]["asr"]
+            vals = sub[sub["attack"] == attack_name]["asr"]
             out[model_name][attack_name] = {
-                "evasion_rate_median": round(float(rows.median()) * 100, 2),
-                "evasion_rate_std":    round(float(rows.std())    * 100, 2),
-                "evasion_rate_min":    round(float(rows.min())    * 100, 2),
-                "evasion_rate_max":    round(float(rows.max())    * 100, 2),
+                "evasion_rate_median": round(float(vals.median()) * 100, 2),
+                "evasion_rate_std":    round(float(vals.std())    * 100, 2),
+                "evasion_rate_min":    round(float(vals.min())    * 100, 2),
+                "evasion_rate_max":    round(float(vals.max())    * 100, 2),
             }
-    with open(RESULTS_DIR / "whitebox_multirun_results.json", "w") as f:
+
+    json_path = RESULTS_DIR / f"whitebox_multirun_{TAG}.json"
+    with open(json_path, "w") as f:
         json.dump(out, f, indent=2)
-    print(f"\nJSON → {RESULTS_DIR / 'whitebox_multirun_results.json'}")
+    print(f"✓ JSON → {json_path}")
 
     return df
 
 
 if __name__ == "__main__":
-    df = run()
+    run()
