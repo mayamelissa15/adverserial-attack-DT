@@ -35,7 +35,6 @@ N_RUNS = 10
 SEEDS = list(range(N_RUNS))
 
 # Mets None pour lancer HSJA/RayS sur tous les exemples d'attaque.
-# Mets 300 si tu veux garder le sous-echantillonnage du script 02_blackbox.py.
 MAX_DECISION_BOUNDARY = None
 
 OUT_CSV = RESULTS_DIR / "hsja_rays_10seeds.csv"
@@ -46,11 +45,11 @@ print(f"Device : {DEVICE} | N_RUNS : {N_RUNS} | EPS : {EPS}")
 
 def load_decision_boundary_attacks():
     """
-    Importe hsja() et rays() depuis 02_blackbox.py.
+    Importe hsja() et rays() depuis blackbox.py.
     Utile car le fichier commence par un chiffre, donc on ne peut pas faire:
-        import 02_blackbox
+        import blackbox
     """
-    path = Path(__file__).parent / "02_blackbox.py"
+    path = Path(__file__).parent / "blackbox.py"
     spec = importlib.util.spec_from_file_location("blackbox_02", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
