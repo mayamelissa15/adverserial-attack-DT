@@ -124,34 +124,44 @@ def load_victims():
 # EVAL SET COMMUN AUX 3 MODÈLES
 # ══════════════════════════════════════════════════════════════
 
-def build_shared_eval(X_test, y_test, mlp_w, logreg_w, xgb_w, seed):
-    """
-    Sélectionne un eval set commun : normaux + TP détectés correctement
-    par les 3 modèles simultanément.
 
-    EVAL_ATK_SIZE est adapté au dataset (200 pour BATADAL, 500 pour SWaT)
-    pour éviter replace=True sur un petit pool d'attaques.
+
+
+# ══════════════════════════════════════════════════════════════
+# UTILITAIRES
+# ══════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════
+# BOUCLE PRINCIPALE
+# ══════════════════════════════════════════════════════════════
+def build_per_model_eval(X_test, y_test, victim_w, seed):
+    """
+    Eval set propre à UN modèle :
+    - normaux : tirage aléatoire
+    - attaques : uniquement les TP de CE modèle (pas l'intersection des 3)
+
+    Pourquoi : avec l'intersection MLP∩LogReg∩XGBoost on se retrouvait
+    avec ~30-80 samples → ASR discret → FGSM=PGD=C&W.
+    Ici chaque modèle a son propre pool de TP → taille maximale.
     """
     rng        = np.random.default_rng(seed)
     idx_normal = np.where(y_test == 0)[0]
     idx_attack = np.where(y_test == 1)[0]
 
-    preds_mlp    = mlp_w.predict(X_test[idx_attack])
-    preds_logreg = logreg_w.predict(X_test[idx_attack])
-    preds_xgb    = xgb_w.predict(X_test[idx_attack])
-    ok_mask      = (preds_mlp == 1) & (preds_logreg == 1) & (preds_xgb == 1)
-    idx_attack_ok = idx_attack[ok_mask]
+    # TP de CE modèle uniquement
+    preds_vic     = victim_w.predict(X_test[idx_attack])
+    idx_attack_ok = idx_attack[preds_vic == 1]
 
     n_atk = min(EVAL_ATK_SIZE, len(idx_attack_ok))
     n_nrm = min(EVAL_NRM_SIZE, len(idx_normal))
 
     if n_atk == 0:
         raise ValueError(
-            f"Aucun TP commun aux 3 modèles sur {DATASET} ! "
-            "Vérifier les F1 des modèles entraînés.")
+            f"Aucun TP pour ce modèle sur {DATASET} — vérifier le F1 baseline.")
 
     sel_n  = rng.choice(idx_normal,    size=n_nrm, replace=False)
-    sel_a  = rng.choice(idx_attack_ok, size=n_atk, replace=False)
+    sel_a  = rng.choice(idx_attack_ok, size=n_atk, replace=n_atk > len(idx_attack_ok))
     idx_ev = np.concatenate([sel_n, sel_a])
     rng.shuffle(idx_ev)
 
@@ -163,11 +173,6 @@ def build_shared_eval(X_test, y_test, mlp_w, logreg_w, xgb_w, seed):
 
     return X_eval, y_eval, X_atk, y_atk
 
-
-# ══════════════════════════════════════════════════════════════
-# UTILITAIRES
-# ══════════════════════════════════════════════════════════════
-
 def set_all_seeds(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -175,9 +180,6 @@ def set_all_seeds(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-# ══════════════════════════════════════════════════════════════
-# BOUCLE PRINCIPALE
-# ══════════════════════════════════════════════════════════════
 
 def run():
     X_test, y_test, mlp_w, logreg_w, xgb_w = load_victims()
@@ -196,18 +198,20 @@ def run():
         print(f"{'═'*55}")
 
         set_all_seeds(seed)
-        X_eval, y_eval, X_atk, y_atk = build_shared_eval(
-            X_test, y_test, mlp_w, logreg_w, xgb_w, seed=seed)
-
-        print(f"  Eval set : {len(X_eval)} exemples "
-              f"({(y_eval==1).sum()} attaques, {(y_eval==0).sum()} normaux)")
 
         for vic_name, vic_w, is_lr, is_xgb in victims:
             print(f"\n  ── {vic_name} {'─'*(45-len(vic_name))}")
 
+            # ✅ Eval set propre à ce modèle
+            X_eval, y_eval, X_atk, y_atk = build_per_model_eval(
+                X_test, y_test, vic_w, seed=seed)
+
+            print(f"  Eval set : {len(X_eval)} exemples "
+                  f"({(y_eval==1).sum()} attaques, {(y_eval==0).sum()} normaux)")
+
             # ── FGSM ──────────────────────────────────────────
             print("  [FGSM]")
-            set_all_seeds(seed)
+            #set_all_seeds(seed)
             if is_lr:
                 X_adv = fgsm_logreg(vic_w, X_atk, y_atk, EPS)
             elif is_xgb:
@@ -216,14 +220,15 @@ def run():
                 X_adv = fgsm_mlp(vic_w, X_atk, y_atk, EPS)
             r = eval_attack(vic_w, X_eval, y_eval, X_adv, "FGSM", vic_name)
             r.update({"seed": seed, "family": "Whitebox",
-                      "eps": EPS, "dataset": DATASET})
+                      "eps": EPS, "dataset": DATASET,
+                      "n_atk": int((y_eval==1).sum())})
             all_results.append(r)
             print(f"    ASR={r['asr']*100:.1f}%  "
                   f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
 
             # ── PGD ───────────────────────────────────────────
             print("  [PGD]")
-            set_all_seeds(seed)
+            #set_all_seeds(seed)
             alpha = EPS / PGD_ALPHA_K
             if is_lr:
                 X_adv = pgd_logreg(vic_w, X_atk, y_atk, EPS,
@@ -239,14 +244,15 @@ def run():
                                 alpha=alpha)
             r = eval_attack(vic_w, X_eval, y_eval, X_adv, "PGD", vic_name)
             r.update({"seed": seed, "family": "Whitebox",
-                      "eps": EPS, "dataset": DATASET})
+                      "eps": EPS, "dataset": DATASET,
+                      "n_atk": int((y_eval==1).sum())})
             all_results.append(r)
             print(f"    ASR={r['asr']*100:.1f}%  "
                   f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
 
             # ── C&W ───────────────────────────────────────────
             print("  [C&W]")
-            set_all_seeds(seed)
+            #set_all_seeds(seed)
             if is_lr:
                 X_adv = cw_logreg(vic_w, X_atk, y_atk, EPS, iters=CW_ITERS)
             elif is_xgb:
@@ -255,7 +261,8 @@ def run():
                 X_adv = cw_mlp(vic_w, X_atk, y_atk, EPS, iters=CW_ITERS)
             r = eval_attack(vic_w, X_eval, y_eval, X_adv, "C&W", vic_name)
             r.update({"seed": seed, "family": "Whitebox",
-                      "eps": EPS, "dataset": DATASET})
+                      "eps": EPS, "dataset": DATASET,
+                      "n_atk": int((y_eval==1).sum())})
             all_results.append(r)
             print(f"    ASR={r['asr']*100:.1f}%  "
                   f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
@@ -274,7 +281,6 @@ def run():
     df.to_csv(csv_path, index=False)
     print(f"\n✓ CSV → {csv_path}")
 
-    # ── Résumé console ────────────────────────────────────────
     summary = (df.groupby(["attack", "model"])["asr"]
                  .agg(["median", "std", "min", "max"])
                  .round(4))
@@ -283,7 +289,6 @@ def run():
     print(f"{'═'*55}")
     print(summary.to_string())
 
-    # ── Export JSON ───────────────────────────────────────────
     out = {}
     for model_name in df["model"].unique():
         out[model_name] = {}
@@ -303,7 +308,6 @@ def run():
     print(f"✓ JSON → {json_path}")
 
     return df
-
 
 if __name__ == "__main__":
     run()
