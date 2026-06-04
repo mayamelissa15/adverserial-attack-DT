@@ -1,5 +1,3 @@
-
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -109,9 +107,6 @@ class LogRegWrapper:
 
     def __init__(self, model):
         self.model = model
-
-    def predict(self, X):
-        return self.model.predict(X)
 
     def predict(self, X, threshold=0.45):
         return (self.model.predict_proba(X)[:, 1] >= threshold).astype(int)
@@ -232,11 +227,6 @@ class XGBoostWrapper:
 # UTILITAIRES D'ÉVALUATION
 # ══════════════════════════════════════════════════════════════
 
-    """
-    Retourne (X_eval, y_eval) : uniquement les vrais positifs du modèle clean,
-    c'est-à-dire les exemples d'attaque que le modèle détecte correctement.
-    Ce sont les seuls exemples sur lesquels une attaque adversariale a du sens.
-    """
 def build_eval_set(X_test, y_test, wrapper, threshold=0.45):
     y_pred = wrapper.predict(X_test, threshold)
     mask = (y_test == 1) & (y_pred == 1)
@@ -248,33 +238,69 @@ def eval_attack(wrapper, X_full, y_full, X_adv, attack_name, model_name,
     """
     Évalue l'efficacité d'une attaque adversariale.
 
+    Important
+    ---------
+    L'ASR est binaire : il compte uniquement les vrais positifs clean qui
+    deviennent prédits comme normaux après attaque. Deux attaques peuvent donc
+    avoir le même ASR tout en produisant des marges/logits différents.
+
     Métriques retournées
     --------------------
-    asr      : Attack Success Rate — fraction des attaques qui trompent le modèle
-    f1_clean : F1 sur le jeu complet sans perturbation
-    f1_adv   : F1 après substitution des exemples adversariaux
-    rec_adv  : Recall après attaque
-    prec_adv : Precision après attaque
-    linf     : Norme L∞ moyenne de la perturbation
+    asr              : Attack Success Rate.
+    f1_clean         : F1 sur le jeu complet sans perturbation.
+    f1_adv           : F1 après remplacement des vrais positifs par X_adv.
+    rec_adv          : Recall après attaque.
+    prec_adv         : Precision après attaque.
+    linf             : L∞ maximal, gardé pour compatibilité avec tes anciens CSV.
+    linf_mean        : L∞ moyen par sample.
+    margin_*         : statistiques des marges logit - threshold_logit sur les TP.
     """
-    # Indices des vrais positifs dans X_full
-    y_pred_clean = wrapper.predict(X_full)
+    # Indices des vrais positifs dans X_full, avec le même seuil partout
+    y_pred_clean = wrapper.predict(X_full, threshold=threshold)
     tp_mask      = (y_full == 1) & (y_pred_clean == 1)
+    n_tp         = int(tp_mask.sum())
 
-    # Construit le jeu évalué : remplace les TP par leurs versions adversariales
-    X_eval       = X_full.copy()
+    if n_tp == 0:
+        return {
+            "attack": attack_name, "model": model_name, "asr": 0.0,
+            "f1_clean": f1_score(y_full, y_pred_clean, zero_division=0),
+            "f1_adv": f1_score(y_full, y_pred_clean, zero_division=0),
+            "rec_adv": recall_score(y_full, y_pred_clean, zero_division=0),
+            "prec_adv": precision_score(y_full, y_pred_clean, zero_division=0),
+            "linf": 0.0, "linf_mean": 0.0, "linf_max": 0.0,
+            "margin_clean_mean": np.nan, "margin_adv_mean": np.nan,
+            "margin_adv_median": np.nan, "margin_adv_min": np.nan,
+            "margin_drop_mean": np.nan, "n_tp": 0,
+        }
+
+    if len(X_adv) != n_tp:
+        raise ValueError(
+            f"X_adv contient {len(X_adv)} samples, mais le nombre de TP clean "
+            f"dans X_full est {n_tp}. Vérifie que X_adv est généré sur X_full[tp_mask]."
+        )
+
+    X_eval = X_full.copy()
     X_eval[tp_mask] = X_adv
 
-    y_pred_adv   = wrapper.predict(X_eval)
+    y_pred_adv = wrapper.predict(X_eval, threshold=threshold)
 
-    # ASR = fraction des TP initiaux maintenant mal classifiés
-    asr = float((y_pred_adv[tp_mask] == 0).mean()) if tp_mask.sum() > 0 else 0.0
+    # ASR = fraction des TP initiaux maintenant classés normaux
+    asr = float((y_pred_adv[tp_mask] == 0).mean())
 
     f1_clean = f1_score(y_full, y_pred_clean, zero_division=0)
     f1_adv   = f1_score(y_full, y_pred_adv,   zero_division=0)
     rec_adv  = recall_score(y_full, y_pred_adv,    zero_division=0)
     prec_adv = precision_score(y_full, y_pred_adv, zero_division=0)
-    linf     = float(np.max(np.abs(X_adv - X_full[tp_mask]))) if tp_mask.sum() > 0 else 0.0
+
+    diff = np.abs(X_adv - X_full[tp_mask])
+    linf_per_sample = np.max(diff, axis=1)
+    linf_max  = float(np.max(linf_per_sample))
+    linf_mean = float(np.mean(linf_per_sample))
+
+    # Marges : positif => encore détecté attaque ; négatif => évadé
+    threshold_logit = float(np.log(threshold / (1.0 - threshold)))
+    clean_margin = wrapper.logits_np(X_full[tp_mask]) - threshold_logit
+    adv_margin   = wrapper.logits_np(X_adv)           - threshold_logit
 
     return {
         "attack":    attack_name,
@@ -284,5 +310,13 @@ def eval_attack(wrapper, X_full, y_full, X_adv, attack_name, model_name,
         "f1_adv":    f1_adv,
         "rec_adv":   rec_adv,
         "prec_adv":  prec_adv,
-        "linf":      linf,
+        "linf":      linf_max,      # compatibilité avec ancien code
+        "linf_mean": linf_mean,
+        "linf_max":  linf_max,
+        "margin_clean_mean": float(np.mean(clean_margin)),
+        "margin_adv_mean":   float(np.mean(adv_margin)),
+        "margin_adv_median": float(np.median(adv_margin)),
+        "margin_adv_min":    float(np.min(adv_margin)),
+        "margin_drop_mean":  float(np.mean(clean_margin - adv_margin)),
+        "n_tp": n_tp,
     }

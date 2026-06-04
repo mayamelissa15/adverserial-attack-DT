@@ -150,7 +150,7 @@ def build_per_model_eval(X_test, y_test, victim_w, seed):
     idx_attack = np.where(y_test == 1)[0]
 
     # TP de CE modèle uniquement
-    preds_vic     = victim_w.predict(X_test[idx_attack])
+    preds_vic     = victim_w.predict(X_test[idx_attack], threshold=0.45)
     idx_attack_ok = idx_attack[preds_vic == 1]
 
     n_atk = min(EVAL_ATK_SIZE, len(idx_attack_ok))
@@ -218,13 +218,15 @@ def run():
                 X_adv = fgsm_xgb(vic_w, X_atk, y_atk, EPS)
             else:
                 X_adv = fgsm_mlp(vic_w, X_atk, y_atk, EPS)
-            r = eval_attack(vic_w, X_eval, y_eval, X_adv, "FGSM", vic_name)
+            r = eval_attack(vic_w, X_eval, y_eval, X_adv, "FGSM", vic_name, threshold=0.45)
             r.update({"seed": seed, "family": "Whitebox",
                       "eps": EPS, "dataset": DATASET,
                       "n_atk": int((y_eval==1).sum())})
             all_results.append(r)
             print(f"    ASR={r['asr']*100:.1f}%  "
-                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
+                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}  "
+                  f"margin_adv_mean={r.get('margin_adv_mean', float('nan')):.4f}  "
+                  f"L∞mean={r.get('linf_mean', float('nan')):.4f}")
 
             # ── PGD ───────────────────────────────────────────
             print("  [PGD]")
@@ -242,13 +244,15 @@ def run():
                 X_adv = pgd_mlp(vic_w, X_atk, y_atk, EPS,
                                 iters=PGD_ITERS, restarts=PGD_RESTARTS,
                                 alpha=alpha)
-            r = eval_attack(vic_w, X_eval, y_eval, X_adv, "PGD", vic_name)
+            r = eval_attack(vic_w, X_eval, y_eval, X_adv, "PGD", vic_name, threshold=0.45)
             r.update({"seed": seed, "family": "Whitebox",
                       "eps": EPS, "dataset": DATASET,
                       "n_atk": int((y_eval==1).sum())})
             all_results.append(r)
             print(f"    ASR={r['asr']*100:.1f}%  "
-                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
+                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}  "
+                  f"margin_adv_mean={r.get('margin_adv_mean', float('nan')):.4f}  "
+                  f"L∞mean={r.get('linf_mean', float('nan')):.4f}")
 
             # ── C&W ───────────────────────────────────────────
             print("  [C&W]")
@@ -259,13 +263,15 @@ def run():
                 X_adv = cw_xgb(vic_w, X_atk, y_atk, EPS, iters=CW_ITERS)
             else:
                 X_adv = cw_mlp(vic_w, X_atk, y_atk, EPS, iters=CW_ITERS)
-            r = eval_attack(vic_w, X_eval, y_eval, X_adv, "C&W", vic_name)
+            r = eval_attack(vic_w, X_eval, y_eval, X_adv, "C&W", vic_name, threshold=0.45)
             r.update({"seed": seed, "family": "Whitebox",
                       "eps": EPS, "dataset": DATASET,
                       "n_atk": int((y_eval==1).sum())})
             all_results.append(r)
             print(f"    ASR={r['asr']*100:.1f}%  "
-                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}")
+                  f"F1 {r['f1_clean']:.3f}→{r['f1_adv']:.3f}  "
+                  f"margin_adv_mean={r.get('margin_adv_mean', float('nan')):.4f}  "
+                  f"L∞mean={r.get('linf_mean', float('nan')):.4f}")
 
         # ── Checkpoint après chaque seed ──────────────────────
         pd.DataFrame(all_results).to_csv(

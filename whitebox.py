@@ -18,7 +18,6 @@ from models import MLP, MLPWrapper, LogRegWrapper, XGBoostWrapper, build_eval_se
 # ══════════════════════════════════════════════════════════════
 # CONFIG
 # ══════════════════════════════════════════════════════════════
-print('test')
 SAVE_DIR  = Path("~/swat/artifacts").expanduser()
 DEVICE    = "cuda" if torch.cuda.is_available() else "cpu"
 THRESHOLD = 0.45
@@ -70,6 +69,36 @@ def _grad_xgb(wrapper, X, mode="vote", eps_fd=EPS_FD):
         return wrapper.grad_numerical(X, eps_fd)
 
 
+def _xgb_bce_direction_sign(wrapper, X, y):
+    """
+    Direction correcte pour FGSM/PGD sur XGBoost.
+
+    wrapper.grad_numerical(X) donne ∂logit/∂x.
+    Pour une attaque d'évasion sur des samples y=1, il faut réduire le logit.
+    Le gradient BCE vaut approximativement :
+        ∇x BCE = (p - y) * ∇x logit
+    Donc on monte la BCE avec +sign(∇x BCE).
+
+    Cette fonction garde le vote multi-eps_fd pour stabiliser XGBoost, puis
+    applique le facteur de direction (p - y).
+    """
+    y = y.astype(np.float64)
+    p = np.clip(wrapper.predict_proba(X), 1e-7, 1.0 - 1e-7)
+
+    if SMOOTH_GRAD:
+        grad_logit = _grad_xgb_smooth(wrapper, X)
+        sign_logit = np.sign(grad_logit)
+    else:
+        grad_mean, sign_logit = _grad_xgb_vote(wrapper, X)
+        # fallback si le vote donne 0 sur certaines features
+        zero_mask = (sign_logit == 0)
+        if np.any(zero_mask):
+            sign_logit[zero_mask] = np.sign(grad_mean[zero_mask])
+
+    direction_factor = np.sign(p - y)[:, None]
+    return direction_factor * sign_logit
+
+
 # ══════════════════════════════════════════════════════════════
 # FGSM
 # ══════════════════════════════════════════════════════════════
@@ -92,13 +121,10 @@ def fgsm_logreg(wrapper, X_atk, y_atk, eps):
 
 
 def fgsm_xgb(wrapper, X_atk, y_atk, eps):
-    if SMOOTH_GRAD:
-        grad = _grad_xgb_smooth(wrapper, X_atk)
-        sign = np.sign(grad)
-    else:
-        _, sign = _grad_xgb_vote(wrapper, X_atk)
+    """FGSM XGBoost corrigé : on monte la BCE, pas le logit brut."""
+    sign = _xgb_bce_direction_sign(wrapper, X_atk, y_atk)
     delta = eps * sign
-    return np.clip(X_atk + delta, X_atk - eps, X_atk + eps)
+    return np.clip(X_atk + delta, X_atk - eps, X_atk + eps).astype(np.float32)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -200,10 +226,14 @@ def pgd_logreg(wrapper, X_atk, y_atk, eps,
 def pgd_xgb(wrapper, X_atk, y_atk, eps,
             iters=PGD_ITERS, restarts=PGD_RESTARTS, alpha=None):
     """
-    PGD XGBoost.
+    PGD XGBoost corrigé.
 
-    FIX RNG : même logique que pgd_logreg — np.random avance naturellement.
-    FIX best_logits : initialisé à +inf pour cohérence.
+    Avant, le code utilisait +sign(∂logit/∂x), ce qui pouvait augmenter
+    le score attaque au lieu de le réduire. Ici on utilise la direction BCE :
+    +sign((p-y)∂logit/∂x). Pour les samples y=1, cette direction baisse le logit.
+
+    FIX RNG : np.random avance naturellement entre restarts.
+    FIX best_logits : initialisé à +inf pour garder la version qui minimise le logit.
     """
     alpha       = alpha or (eps / PGD_ALPHA_K)
     best_adv    = X_atk.copy().astype(np.float32)
@@ -216,8 +246,10 @@ def pgd_xgb(wrapper, X_atk, y_atk, eps,
         x_adv = np.clip(x_adv, X_atk - eps, X_atk + eps)
 
         for _ in range(iters):
-            g     = wrapper.grad_numerical(x_adv, EPS_FD)
-            x_adv = x_adv + alpha * np.sign(g)
+            # Direction corrigée : montée de la BCE.
+            # Pour y=1, cela revient à pousser le logit vers le bas.
+            sign  = _xgb_bce_direction_sign(wrapper, x_adv, y_atk)
+            x_adv = x_adv + alpha * sign
             x_adv = np.clip(x_adv, X_atk - eps, X_atk + eps)
 
         logits   = wrapper.logits_np(x_adv)
